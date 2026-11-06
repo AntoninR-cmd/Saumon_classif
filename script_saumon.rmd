@@ -5,6 +5,10 @@ output: html_document
 
 ## Importation des données et séparation des matrices
 
+Le fichier contient deux types de lignes décrites sur les mêmes 30 produits. Les 1063 premières sont des consommateurs : leurs notes des produits forment X1 et leurs réponses au questionnaire forment X2. Les 25 dernières décrivent les produits (mesures physico-chimiques, microbiologiques, couleur et origine) et forment X3.
+
+Chaque ligne de X1 et de X3 est centrée-réduite sur les 30 produits. Pour un consommateur, seul l'ordre de ses préférences compte, pas son niveau moyen de notation. Le consommateur 1003 n'a aucune note : on le retire, car l'imputer reviendrait à lui inventer des préférences.
+
 ```{r}
 library(FactoMineR)
 
@@ -22,6 +26,12 @@ X2 <- X2[ok, ]
 ```
 
 ## ACP de X1 avec les variables de X2 en supplémentaire
+
+Les individus sont les consommateurs et les variables actives sont les 30 produits. L'ACP est normée, chaque produit a donc le même poids. Deux consommateurs proches sur les axes classent les produits de façon semblable.
+
+Country et les variables de X2 sont supplémentaires : elles ne participent pas à la construction des axes. Chaque modalité est placée au barycentre des consommateurs qui la possèdent. `dimdesc` teste le lien entre une variable et un axe (R² de l'analyse de variance des coordonnées). La v.test d'une modalité mesure l'écart de son barycentre à l'origine ; au-delà de 2 en valeur absolue, l'écart est significatif au seuil de 5 %.
+
+On garde 10 axes pour la classification, ce qui écarte les dernières dimensions, surtout porteuses de bruit.
 
 ```{r}
 set.seed(123)  # ncp < 15 : FactoMineR utilise une SVD approchée à départ aléatoire
@@ -50,6 +60,10 @@ ggplot(mod, aes(Dim.1, Dim.2, label = rownames(mod))) +
 
 ## Classification hiérarchique des consommateurs (k = 3)
 
+On regroupe les consommateurs à partir de leurs coordonnées sur les 10 axes de l'ACP. La classification ascendante hiérarchique utilise le critère de Ward : à chaque étape, elle fusionne les deux classes dont la réunion fait le moins augmenter l'inertie intra-classe. On coupe l'arbre en 3 classes, puis une consolidation par k-means réaffecte chaque consommateur à la classe dont le centre est le plus proche.
+
+X2 n'intervient pas dans la partition, il sert seulement à décrire les classes. `desc.var$quanti` donne les produits dont la note moyenne dans la classe s'écarte significativement de la moyenne générale (v.test). `desc.var$category` donne les modalités de X2 sur- ou sous-représentées dans chaque classe (test hypergéométrique).
+
 ```{r}
 res_hcpc <- HCPC(res_pca, nb.clust = 3, consol = TRUE, graph = FALSE)
 classe <- res_hcpc$data.clust$clust
@@ -64,6 +78,10 @@ res_hcpc$desc.var$category
 
 ## ACP des classes avec les descripteurs de X3 en supplémentaire
 
+Chaque classe est résumée par son profil moyen, la note moyenne de ses consommateurs sur chaque produit. Ce profil est centré-réduit sur les 30 produits, comme les lignes de X3, pour que classes et descripteurs soient sur la même échelle.
+
+Les 3 classes sont les individus actifs et les 30 produits les variables. L'ACP n'est pas normée : avec 3 individus, réduire chaque produit n'aurait pas de sens. Trois individus définissent un plan, donc les deux premiers axes portent toute l'inertie. Les 25 lignes de X3 sont projetées en individus supplémentaires.
+
 ```{r}
 # Profil moyen de chaque classe, centré-réduit sur les produits comme les lignes de X3
 cr <- function(x) (x - mean(x)) / sqrt(mean((x - mean(x))^2))
@@ -77,4 +95,4 @@ res_pca_cl <- PCA(don, ind.sup = 4:nrow(don), scale.unit = FALSE, graph = FALSE)
 plot(res_pca_cl, choix = "ind")
 ```
 
-Les descripteurs se comportent comme des consommateurs fictifs expert dans la variable donnée. Ce consommateurs note le produit exclusivement et de manière hédonique chaque produit en fonction de la variable dont il est expert.
+Une ligne de X3 se lit comme le profil d'un consommateur fictif dont la préférence suivrait exactement le descripteur. Pour la ligne `salt`, ce consommateur préférerait le produit le plus salé ; pour une ligne d'origine (0/1), il préférerait les produits de cette origine. Un descripteur proche d'une classe indique que ses consommateurs préfèrent les produits où ce descripteur est élevé. Cette lecture ne vaut que pour un descripteur bien représenté sur le plan (cos² élevé).
