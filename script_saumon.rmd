@@ -65,7 +65,12 @@ On regroupe les consommateurs à partir de leurs coordonnées sur les 10 axes de
 X2 n'intervient pas dans la partition, il sert seulement à décrire les classes. `desc.var$quanti` donne les produits dont la note moyenne dans la classe s'écarte significativement de la moyenne générale (v.test). `desc.var$category` donne les modalités de X2 sur- ou sous-représentées dans chaque classe (test hypergéométrique).
 
 ```{r}
+# Classification sur les 10 premiers axes de l'ACP
+# Ward.D2 : minimise l'augmentation de l'inertie intra-classe
+# nb.clust = 3 :  il y'a un saut important de l'inertie, on impose 3 classes
+# consol = TRUE : consolidation par k-means
 res_hcpc <- HCPC(res_pca, nb.clust = 3, consol = TRUE, graph = FALSE)
+
 classe <- res_hcpc$data.clust$clust
 table(classe)
 
@@ -96,3 +101,7 @@ plot(res_pca_cl, choix = "ind")
 ```
 
 Une ligne de X3 se lit comme le profil d'un consommateur fictif dont la préférence suivrait exactement le descripteur. Pour la ligne `salt`, ce consommateur préférerait le produit le plus salé ; pour une ligne d'origine (0/1), il préférerait les produits de cette origine. Un descripteur proche d'une classe indique que ses consommateurs préfèrent les produits où ce descripteur est élevé. Cette lecture ne vaut que pour un descripteur bien représenté sur le plan (cos² élevé).
+
+# Conclusion : Apport des variables x2 et x3
+
+La comparaison des matrices X2 et X3 permet de compléter l'interprétation de la classification des consommateurs. Les variables de X2, correspondant aux réponses au questionnaire, permettent de caractériser les consommateurs selon leurs profils et leurs habitudes. Toutefois, les associations entre ces variables et les classes obtenues restent relativement faibles, ce qui suggère que les différences de préférences ne s'expliquent pas uniquement par les caractéristiques des consommateurs. En revanche, les descripteurs de X3 permettent de relier les classes aux caractéristiques des produits, notamment à des variables telles que la teneur en sel ou la fraîcheur. X3 apporte ainsi une interprétation plus directe des préférences des consommateurs en mettant en évidence les caractéristiques des saumons associées aux différents profils de préférence.
