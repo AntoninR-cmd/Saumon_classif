@@ -1,0 +1,80 @@
+---
+title: "Classification des consommateurs de saumon"
+output: html_document
+---
+
+## Importation des données et séparation des matrices
+
+```{r}
+library(FactoMineR)
+
+saumon <- read.csv2("saumon.csv", row.names = 1,
+                    stringsAsFactors = TRUE, check.names = FALSE)
+
+X1 <- droplevels(saumon[1:1063, 1:31])             # consommateurs x (Country + produits)
+X2 <- droplevels(saumon[1:1063, 32:ncol(saumon)])  # consommateurs x questionnaire
+X3 <- saumon[1064:nrow(saumon), 2:31]              # descripteurs x produits
+
+# Un consommateur n'a aucune note : on le retire
+ok <- rowSums(is.na(X1[, -1])) < 30
+X1 <- X1[ok, ]
+X2 <- X2[ok, ]
+```
+
+## ACP de X1 avec les variables de X2 en supplémentaire
+
+```{r}
+set.seed(123)  # ncp < 15 : FactoMineR utilise une SVD approchée à départ aléatoire
+res_pca <- PCA(cbind(X1, X2), quali.sup = c(1, 32:99), ncp = 10, graph = FALSE)
+
+plot(res_pca, choix = "var")
+plot(res_pca, choix = "ind", label = "none", invisible = "quali")
+
+# Variables de X2 liées aux axes 1 et 2
+lapply(dimdesc(res_pca, axes = 1:2), function(d) d$quali)
+
+# Modalités de X2 les plus liées aux axes 1 et 2 (|v.test| > 3)
+library(ggplot2)
+mod <- as.data.frame(res_pca$quali.sup$coord[, 1:2])
+mod <- mod[-(1:nlevels(X1$Country)), ]
+mod <- mod[apply(abs(res_pca$quali.sup$v.test[rownames(mod), 1:2]), 1, max) > 3, ]
+
+ggplot(mod, aes(Dim.1, Dim.2, label = rownames(mod))) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_point(colour = "darkgreen") +
+  ggrepel::geom_text_repel(size = 3) +
+  labs(title = "Modalités supplémentaires de X2") +
+  theme_minimal()
+```
+
+## Classification hiérarchique des consommateurs (k = 3)
+
+```{r}
+res_hcpc <- HCPC(res_pca, nb.clust = 3, consol = TRUE, graph = FALSE)
+classe <- res_hcpc$data.clust$clust
+table(classe)
+
+plot(res_hcpc, choice = "tree")
+plot(res_hcpc, choice = "map", draw.tree = FALSE, ind.names = FALSE)
+
+res_hcpc$desc.var$quanti
+res_hcpc$desc.var$category
+```
+
+## ACP des classes avec les descripteurs de X3 en supplémentaire
+
+```{r}
+# Profil moyen de chaque classe, centré-réduit sur les produits comme les lignes de X3
+cr <- function(x) (x - mean(x)) / sqrt(mean((x - mean(x))^2))
+profils <- t(sapply(split(X1[, -1], classe), colMeans))
+profils <- t(apply(profils, 1, cr))
+rownames(profils) <- paste0("classe_", rownames(profils))
+
+don <- rbind(profils, X3)
+res_pca_cl <- PCA(don, ind.sup = 4:nrow(don), scale.unit = FALSE, graph = FALSE)
+
+plot(res_pca_cl, choix = "ind")
+```
+
+Les descripteurs se comportent comme des consommateurs fictifs expert dans la variable donnée. Ce consommateurs note le produit exclusivement et de manière hédonique chaque produit en fonction de la variable dont il est expert.

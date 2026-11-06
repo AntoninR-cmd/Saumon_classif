@@ -1,0 +1,435 @@
+---
+title: "Saumon : ACP, classification des consommateurs et lien avec les descripteurs produits"
+subtitle: "Classification non supervisée (S. Lê) : problème du 4e coin"
+author: "Antonin Rivron"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 6, fig.align = "center")
+library(FactoMineR)
+library(factoextra)
+library(ggplot2)
+library(ggrepel)
+set.seed(123)
+```
+
+# Objectif et démarche
+
+Le fichier `saumon.csv` contient trois tableaux qui partagent soit leurs lignes, soit leurs colonnes :
+
+|                         | 30 produits (colonnes)            | questionnaire (colonnes)        |
+|-------------------------|-----------------------------------|---------------------------------|
+| **consommateurs** (lignes) | **X1** : notes des consommateurs | **X2** : usages et attitudes   |
+| **descripteurs** (lignes)  | **X3** : physico-chimie, bactéries, couleur, pays | **X4** : le 4e coin, non observé |
+
+On procède en quatre temps :
+
+1. **ACP de X1** : comprendre la structure des préférences, en projetant le questionnaire X2 (et la ville) en variables supplémentaires.
+2. **CAH de X1** : regrouper les consommateurs qui notent les produits de la même façon.
+3. **ACP des classes** : résumer chaque classe par son profil moyen sur les 30 produits, et projeter les lignes de X3 en individus supplémentaires.
+4. **Distances entre les lignes de X3 et les classes** : pour chaque classe, trouver les caractéristiques produits qui « ressemblent » le plus à ses préférences.
+
+Le fil rouge : X1 et X2 ont les mêmes **lignes** (les consommateurs), X1 et X3 ont les mêmes **colonnes** (les produits). La classification de X1 sert de pont entre les deux.
+
+# Importation et préparation des données
+
+```{r import}
+saumon <- read.csv2("saumon.csv", header = TRUE, row.names = 1,
+                    stringsAsFactors = TRUE, check.names = FALSE)
+dim(saumon)
+```
+
+Le fichier empile les blocs :
+
+- lignes 1 à 1063 : les consommateurs ; lignes 1064 à 1088 : les 25 descripteurs des produits ;
+- colonne 1 : la ville (`Country`) ; colonnes 2 à 31 : les 30 produits ; colonnes 32 à 99 : les 68 questions.
+
+```{r separation}
+X1      <- saumon[1:1063, 2:31]                       # consommateurs x produits
+Country <- droplevels(saumon[1:1063, 1])              # ville de l'enquête
+X2      <- droplevels(saumon[1:1063, 32:ncol(saumon)])  # consommateurs x questionnaire
+X3      <- saumon[1064:nrow(saumon), 2:31]            # descripteurs x produits
+
+dim(X1); dim(X2); dim(X3)
+rownames(X3)
+```
+
+La ville n'est ni une note ni une réponse au questionnaire, mais elle décrit les consommateurs : on la traitera comme X2, en variable **supplémentaire**.
+
+## Données manquantes
+
+```{r manquants}
+sum(is.na(X1))
+vides <- rowSums(is.na(X1)) == ncol(X1)
+rownames(X1)[vides]
+```
+
+Les 30 valeurs manquantes appartiennent toutes au même consommateur, qui n'a noté aucun produit. Il n'apporte aucune information sur les préférences : on le **retire** de X1, de X2 et de la ville plutôt que de l'imputer.
+
+```{r retrait}
+X1      <- X1[!vides, ]
+X2      <- droplevels(X2[!vides, ])
+Country <- droplevels(Country[!vides])
+
+n <- nrow(X1)   # nombre de consommateurs
+p <- ncol(X1)   # nombre de produits
+c(n = n, p = p, NA_X1 = sum(is.na(X1)), NA_X2 = sum(is.na(X2)))
+```
+
+## Une propriété clé : les lignes sont centrées-réduites
+
+```{r reduction}
+# Écart-type en 1/n (convention du cours)
+sd_n <- function(M) sqrt(rowMeans(sweep(as.matrix(M), 1, rowMeans(M))^2))
+
+summary(rowMeans(X1)); summary(sd_n(X1))
+round(rowMeans(X3), 4); round(sd_n(X3), 4)
+```
+
+Chaque ligne de X1 **et** chaque ligne de X3 a une moyenne nulle et un écart-type égal à 1 sur les 30 produits. Deux conséquences :
+
+- **Pas d'effet « note généreuse ».** Un consommateur qui note tout haut et un consommateur qui note tout bas ont le même profil s'ils classent les produits dans le même ordre. On compare des **classements relatifs** des produits, pas des niveaux de notes.
+- **Les lignes de X1 et de X3 vivent dans le même espace** : $\mathbb{R}^{30}$, avec la même échelle. Pour deux lignes $a$ et $b$ centrées-réduites :
+$$d^2(a, b) = \sum_{j=1}^{p}(a_j - b_j)^2 = 2p\,\bigl(1 - r(a, b)\bigr).$$
+La distance euclidienne entre deux lignes est une fonction décroissante de leur corrélation sur les produits. C'est ce qui rend légitime de « ranger X3 sous X1 » (partie 5.3 du cours) : une ligne de X3 est un profil sur les produits, exactement comme une ligne de X1.
+
+# ACP de X1, X2 en variables supplémentaires
+
+## Construction
+
+```{r acp-x1}
+don <- data.frame(X1, Country = Country, X2, check.names = FALSE)
+
+res_pca <- PCA(don,
+               scale.unit = FALSE,                   # notes déjà sur la même échelle
+               ncp        = Inf,                     # on garde tous les axes (utile pour la CAH)
+               quali.sup  = (p + 1):ncol(don),       # ville + 68 questions
+               graph      = FALSE)
+```
+
+Choix de l'analyse :
+
+- **Individus actifs** : les `r n` consommateurs. **Variables actives** : les `r p` produits. Ce sont eux seuls qui construisent les axes.
+- **ACP non normée** (`scale.unit = FALSE`). Les notes sont toutes dans la même unité, et les écarts-types des produits sont proches. Ne pas réduire les colonnes garde la vraie distance euclidienne entre consommateurs, celle que la CAH utilisera et celle qu'on calculera avec X3 à la fin. Une ACP normée donnerait des axes très proches.
+- **Variables supplémentaires** (poids nul) : la ville et les 68 questions de X2, toutes qualitatives. Chaque modalité est projetée au **barycentre** des consommateurs qui l'ont choisie. Elles aident à interpréter les axes sans les modifier.
+
+## Valeurs propres
+
+```{r eboulis}
+round(head(res_pca$eig, 10), 2)
+fviz_eig(res_pca, addlabels = TRUE, ncp = 15)
+```
+
+Les deux premiers axes ne résument que `r round(res_pca$eig[2, 3], 1)` % de l'inertie, et la décroissance des valeurs propres est très lente : il n'y a pas de coude net.
+
+**Interprétation.** C'est typique des données de préférence centrées par consommateur. Comme il n'y a pas d'effet taille, l'axe 1 n'est pas un « consensus » : il capte seulement la principale **opposition de goûts**, et les préférences sont très hétérogènes. Il ne faut donc pas sur-interpréter le plan 1-2, et la classification se fera sur **tous** les axes, pour ne pas jeter plus de la moitié de l'information.
+
+## Les produits (variables actives)
+
+```{r var-x1, fig.height = 7}
+fviz_pca_var(res_pca, col.var = "contrib", repel = TRUE,
+             gradient.cols = c("grey70", "steelblue", "darkred"))
+
+# Corrélations produits / axes, triées sur l'axe 1
+cor_prod <- res_pca$var$cor[, 1:2]
+round(cor_prod[order(cor_prod[, 1]), ], 2)
+```
+
+**Lecture.** Deux produits proches sur le graphique sont appréciés par les mêmes consommateurs. Le signe des axes est arbitraire : seules les **oppositions** comptent.
+
+- L'**axe 1** oppose un groupe de produits (prod10, prod29, prod23, prod15, prod20…) à un autre (prod26, prod25, prod18, prod28…). Un consommateur situé d'un côté préfère le premier groupe et rejette le second.
+- L'**axe 2** oppose notamment prod3, prod19, prod18, prod30 à prod24, prod11, prod27, prod28.
+- Les corrélations restent modérées (au plus 0,5 environ) : aucun produit n'est « porté » par un seul axe.
+
+## Les consommateurs et la ville
+
+```{r ind-x1}
+plot(res_pca, choix = "ind", habillage = p + 1, label = "none", invisible = "quali")
+plotellipses(res_pca, keepvar = "Country", label = "quali", invisible = "ind")
+```
+
+Le nuage des consommateurs est une boule sans structure évidente : les classes ne seront pas « visibles à l'œil » dans ce plan. En revanche, les barycentres des villes et leurs ellipses de confiance montrent des différences significatives : les villes britanniques (Sittingbourne, Whitley bay) et Milan s'opposent notamment à Lyon, F, W et BXL sur l'axe 2.
+
+## Le questionnaire X2 (variables supplémentaires)
+
+```{r desc-axes}
+desc_axes <- dimdesc(res_pca, axes = 1:2)
+head(desc_axes$Dim.1$quali, 10)   # R² = rapport de corrélation variable / axe
+head(desc_axes$Dim.2$quali, 10)
+```
+
+```{r modalites-x2, fig.height = 7}
+seuil     <- 3
+lignes_X2 <- -(1:nlevels(Country))            # on retire les modalités de la ville
+vt_X2     <- res_pca$quali.sup$v.test[lignes_X2, 1:2]
+mod_X2    <- as.data.frame(res_pca$quali.sup$coord[lignes_X2, 1:2])
+mod_X2    <- mod_X2[apply(abs(vt_X2), 1, max) > seuil, ]
+mod_X2$modalite <- rownames(mod_X2)
+
+ggplot(mod_X2, aes(Dim.1, Dim.2, label = modalite)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  geom_point(colour = "darkgreen") +
+  geom_text_repel(size = 3) +
+  labs(title = sprintf("Modalités de X2 significatives (|v.test| > %d)", seuil),
+       x = sprintf("Dim 1 (%.1f %%)", res_pca$eig[1, 2]),
+       y = sprintf("Dim 2 (%.1f %%)", res_pca$eig[2, 2])) +
+  theme_minimal()
+```
+
+**Lecture.** La **valeur-test** mesure l'écart entre le barycentre d'une modalité et l'origine, en nombre d'écarts-types : au-delà de 2 (ou 3, plus prudent avec autant de modalités), la modalité est significativement liée à l'axe.
+
+**Interprétation.**
+
+- Les variables les plus liées aux axes sont la ville, puis des attentes sur le produit, comme « Not too salty » ou « Not expensive » sur l'axe 1, « Healthy » ou « Who » sur l'axe 2. Les consommateurs qui exigent un saumon « pas trop salé » se placent du côté des produits les moins salés : l'axe 1 est en partie un **axe du sel**, ce que X3 confirmera.
+- Les rapports de corrélation restent **très faibles** (quelques %). Les habitudes déclarées expliquent mal les préférences réellement exprimées : c'est un résultat classique en analyse sensorielle, et une raison de passer par une classification plutôt que par les axes seuls.
+
+# Classification ascendante hiérarchique de X1
+
+## Principe
+
+On applique la CAH avec le **critère de Ward** sur les coordonnées des consommateurs dans l'ACP. Comme on garde tous les axes (`ncp = Inf`), cela revient à une CAH sur la distance euclidienne entre les profils de notes dans $\mathbb{R}^{30}$.
+
+Ward fusionne à chaque étape les deux classes dont la réunion fait **le moins augmenter l'inertie intra-classe**. D'après Huygens (inertie totale = intra + inter), c'est aussi ce qui fait le moins baisser l'inertie inter-classes. On coupe ensuite l'arbre, puis on **consolide** la partition par des K-means initialisés aux centres des classes de la CAH.
+
+```{r hcpc}
+res_hcpc <- HCPC(res_pca, nb.clust = -1, min = 3, max = 10,
+                 consol = TRUE, graph = FALSE)
+classe <- res_hcpc$data.clust$clust
+K      <- nlevels(classe)
+table(classe)
+```
+
+`nb.clust = -1` coupe l'arbre automatiquement. HCPC retient le nombre de classes $q$ (entre 3 et 10) qui minimise $W(q)/W(q-1)$, où $W$ est l'inertie intra : c'est le niveau après lequel découper davantage rapporte proportionnellement le moins. On obtient ici **K = `r K` classes**.
+
+## Arbre et gains d'inertie
+
+```{r arbre, fig.height = 5}
+fviz_dend(res_hcpc, show_labels = FALSE, rect = TRUE, rect_fill = TRUE,
+          main = "Dendrogramme (Ward) des consommateurs")
+plot(res_hcpc, choice = "bar")
+```
+
+Le diagramme en barres donne le **gain d'inertie** de chaque fusion. Les premières barres, nettement plus hautes, justifient de couper en peu de classes : les fusions suivantes coûtent beaucoup moins.
+
+```{r carte-classes}
+plot(res_hcpc, choice = "map", draw.tree = FALSE, ind.names = FALSE)
+```
+
+## Qualité de la partition (calcul à la main)
+
+```{r r2-partition}
+X1m    <- as.matrix(X1)
+g      <- colMeans(X1m)                                        # centre de gravité global
+G      <- apply(X1m, 2, function(x) tapply(x, classe, mean))  # K x 30 : barycentres
+n_k    <- as.vector(table(classe))
+
+I_tot   <- sum(sweep(X1m, 2, g)^2) / n                         # inertie totale
+I_inter <- sum(n_k / n * rowSums(sweep(G, 2, g)^2))            # inertie inter-classes
+c(I_tot = I_tot, I_inter = I_inter, R2 = I_inter / I_tot)
+```
+
+La partition n'explique que `r round(100 * I_inter / I_tot, 1)` % de l'inertie. C'est faible mais attendu : le nuage n'a pas de groupes bien séparés (cf. ACP). Les classes sont des **tendances de goût**, pas des îlots isolés.
+
+## Vérification : la même CAH avec `dist()` et `hclust()`
+
+```{r cah-main}
+D_cons  <- dist(X1m)                          # matrice des distances euclidiennes
+arbre   <- hclust(D_cons, method = "ward.D2")
+cl_main <- cutree(arbre, k = K)
+
+res_hcpc_brut <- HCPC(res_pca, nb.clust = K, consol = FALSE, graph = FALSE)
+table(main = cl_main, HCPC_sans_consolidation = res_hcpc_brut$data.clust$clust)
+```
+
+Le tableau croisé doit être (à une permutation des numéros près) diagonal : HCPC sans consolidation et `hclust(…, "ward.D2")` sur les distances euclidiennes construisent la même hiérarchie. La consolidation K-means déplace ensuite quelques individus.
+
+## Description des classes
+
+**Par les produits** : produits dont la note moyenne dans la classe diffère significativement de la moyenne générale.
+
+```{r desc-produits}
+lapply(res_hcpc$desc.var$quanti, function(d)
+  if (is.null(d)) NULL else round(d[, c("Mean in category", "Overall mean", "v.test"), drop = FALSE], 2))
+```
+
+**Par la ville et le questionnaire** : modalités sur- ou sous-représentées dans chaque classe (test du khi-deux / hypergéométrique).
+
+```{r desc-x2}
+head(res_hcpc$desc.var$test.chi2, 15)
+lapply(res_hcpc$desc.var$category, head, 8)
+```
+
+**Lecture.** Une `v.test` positive pour un produit signifie que la classe l'apprécie plus que l'ensemble des consommateurs. Une modalité avec `Mod/Cla` > `Global` est sur-représentée dans la classe. Comme pour l'ACP, les liens avec X2 restent modestes : les classes se définissent d'abord par **ce que les gens aiment**, pas par ce qu'ils déclarent.
+
+# ACP des classes de X1, X3 en individus supplémentaires
+
+## Construction du tableau
+
+Chaque classe est résumée par son **barycentre** : la note moyenne de ses membres sur chacun des 30 produits. On obtient un tableau $K \times 30$, auquel on ajoute les 25 lignes de X3 :
+
+```{r tableau-classes}
+G <- as.data.frame(G)
+rownames(G) <- paste0("classe_", rownames(G))
+round(G, 2)
+
+don_cl <- rbind(G, X3)   # K classes actives + 25 descripteurs supplémentaires
+dim(don_cl)
+```
+
+Les deux blocs ont les mêmes colonnes (les produits), donc on peut les empiler. C'est exactement l'idée de « mettre X3 sous X1 », mais au niveau des classes.
+
+```{r acp-classes}
+res_pca_cl <- PCA(don_cl,
+                  scale.unit = FALSE,
+                  ind.sup    = (K + 1):nrow(don_cl),   # les lignes de X3
+                  row.w      = n_k,                    # chaque classe pèse son effectif
+                  graph      = FALSE)
+round(res_pca_cl$eig, 2)
+```
+
+Choix de l'analyse :
+
+- **Individus actifs** : les `r K` barycentres, **pondérés par l'effectif** de leur classe. Avec ces poids, l'inertie de ce nuage est exactement l'**inertie inter-classes** calculée plus haut : cette ACP décompose ce qui sépare les classes.
+- **Individus supplémentaires** : les 25 descripteurs de X3, avec un poids nul. Ils sont centrés par le profil moyen des consommateurs, puis projetés.
+- Avec `r K` points, il y a au plus `r K - 1` axes non nuls : le plan 1-2 représente `r round(res_pca_cl$eig[min(2, K - 1), 3], 1)` % de l'inertie inter-classes, donc la position **relative** des classes est vue sans déformation.
+
+## Carte des classes et des descripteurs
+
+```{r carte-x3, fig.height = 7}
+coord_cl  <- data.frame(res_pca_cl$ind$coord[, 1:2],     type = "Classe (X1)")
+coord_sup <- data.frame(res_pca_cl$ind.sup$coord[, 1:2], type = "Descripteur (X3)")
+carte     <- rbind(coord_cl, coord_sup)
+carte$nom <- rownames(carte)
+
+ggplot(carte, aes(Dim.1, Dim.2, colour = type, label = nom)) +
+  geom_hline(yintercept = 0, linetype = 2, colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = 2, colour = "grey60") +
+  geom_point(aes(size = type)) +
+  scale_size_manual(values = c(4, 2)) +
+  geom_text_repel(size = 3.2, max.overlaps = 30, show.legend = FALSE) +
+  scale_colour_manual(values = c("darkred", "steelblue")) +
+  labs(title = "Classes de consommateurs et descripteurs produits projetés",
+       x = sprintf("Dim 1 (%.1f %%)", res_pca_cl$eig[1, 2]),
+       y = sprintf("Dim 2 (%.1f %%)", res_pca_cl$eig[2, 2]),
+       colour = NULL, size = NULL) +
+  theme_minimal()
+```
+
+```{r produits-classes, fig.height = 6}
+fviz_pca_var(res_pca_cl, repel = TRUE, select.var = list(contrib = 15),
+             title = "Produits les plus contributifs à la séparation des classes")
+```
+
+**Lecture.**
+
+- Une **classe** est placée du côté des produits qu'elle note au-dessus de la moyenne.
+- Un **descripteur** de X3 est placé du côté des produits pour lesquels il est élevé. Si une classe et un descripteur sont dans la **même direction**, les produits que cette classe préfère sont ceux qui ont une valeur élevée de ce descripteur. Dans la direction **opposée**, la classe rejette les produits riches en ce descripteur.
+- Les descripteurs projetés près de l'origine ne différencient pas les classes.
+
+**Interprétation attendue** (d'après un calcul préliminaire ; les numéros de classes peuvent être permutés, vérifie sur ta sortie) :
+
+- une classe se place du côté des indicateurs d'**altération microbienne** : TVBN, TMA, flore totale, flore lactique, entérobactéries. Elle préfère des produits plus « travaillés », au goût plus fort ;
+- une classe se place du côté du **sel**, avec les produits vendus en France, et à l'opposé des produits britanniques et des indicateurs d'altération ;
+- une classe se place du côté du **phénol** (fumage) et du sel.
+
+On retrouve l'axe « sel » repéré avec X2 : le lien entre habitudes et caractéristiques produits commence à apparaître, en passant par les classes.
+
+## Attention : une projection n'est pas une distance
+
+```{r cos2-sup}
+round(sort(rowSums(res_pca_cl$ind.sup$cos2[, 1:2]), decreasing = TRUE), 2)
+```
+
+Les descripteurs vivent dans $\mathbb{R}^{30}$, alors que les classes n'engendrent qu'un sous-espace de dimension `r K - 1`. Les cos² des descripteurs sont donc faibles : la carte montre leur **direction** par rapport aux classes, mais la distance lue sur le graphique n'est pas la vraie distance. On la calcule maintenant dans l'espace complet.
+
+# Distances entre les lignes de X3 et les classes
+
+## Calcul matriciel à la main
+
+On note $A$ la matrice $25 \times 30$ des descripteurs (X3) et $B$ la matrice $K \times 30$ des barycentres. En développant le carré :
+$$d^2(a_i, b_k) = \|a_i\|^2 + \|b_k\|^2 - 2\, a_i^\top b_k
+\quad\Longrightarrow\quad
+D^2 = \|A\|^2\,\mathbf{1}_K^\top + \mathbf{1}_{25}\,\|B\|^{2\top} - 2\,A B^\top.$$
+
+```{r distances}
+A <- as.matrix(X3)   # 25 x 30
+B <- as.matrix(G)    # K x 30
+
+D2 <- outer(rowSums(A^2), rowSums(B^2), "+") - 2 * A %*% t(B)
+D  <- sqrt(pmax(D2, 0))   # pmax évite un -0.0000001 dû aux arrondis
+round(D, 2)
+
+# Vérification avec dist() sur le tableau empilé
+D_check <- as.matrix(dist(rbind(A, B)))[rownames(A), rownames(B)]
+all.equal(D, D_check, check.attributes = FALSE)
+```
+
+## Distance et corrélation
+
+Les lignes de X3 sont centrées-réduites, et les barycentres sont centrés (moyenne de profils centrés) mais **pas réduits** : leur écart-type $s_k$ est inférieur à 1, car moyenner des profils différents les « écrase ». On a alors :
+$$d^2(a_i, b_k) = p\,\bigl(1 + s_k^2 - 2\, s_k\, r(a_i, b_k)\bigr).$$
+
+```{r distance-correlation}
+s_k <- sd_n(B)
+round(s_k, 3)
+
+R_cor <- cor(t(A), t(B))   # corrélation descripteur / profil de classe, sur les 30 produits
+round(R_cor, 2)
+
+# Vérification de la formule (écart dû aux arrondis à 4 décimales du fichier)
+D2_formule <- p * (1 + outer(rep(1, nrow(A)), s_k^2) - 2 * sweep(R_cor, 2, s_k, "*"))
+max(abs(D2 - D2_formule))
+```
+
+**Conséquences pour l'interprétation.**
+
+- **Dans une même classe** ($s_k$ fixé), la distance est une fonction décroissante de la corrélation : le descripteur le plus proche est celui qui varie entre les produits **dans le même sens que les préférences de la classe**. Le plus éloigné varie en sens inverse : la classe rejette les produits qui en sont riches.
+- **D'une classe à l'autre**, les distances brutes ne se comparent pas directement, car $s_k$ change. Pour comparer les classes entre elles, on utilise les profils de classes réduits, ce qui donne $d^2 = 2p(1 - r)$, ou directement la corrélation.
+
+```{r distance-reduite}
+D_red <- sqrt(2 * p * (1 - R_cor))
+round(D_red, 2)
+```
+
+## Visualisation et synthèse
+
+```{r heatmap, fig.height = 8, fig.width = 6}
+df_D <- as.data.frame(as.table(D))
+names(df_D) <- c("descripteur", "classe", "distance")
+
+ggplot(df_D, aes(classe, descripteur, fill = distance)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(distance, 2)), size = 3) +
+  scale_fill_gradient(low = "steelblue", high = "white") +
+  scale_y_discrete(limits = rev) +
+  labs(title = "Distance euclidienne descripteur (X3) / classe", x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+```{r synthese}
+synthese <- t(sapply(colnames(D), function(k) {
+  o <- sort(D[, k])
+  c(effectif        = n_k[match(k, colnames(D))],
+    plus_proches    = paste(names(o)[1:3], collapse = ", "),
+    plus_eloignes   = paste(rev(names(o))[1:3], collapse = ", "))
+}))
+knitr::kable(synthese, caption = "Descripteurs les plus proches et les plus éloignés de chaque classe")
+```
+
+**Interprétation.** On lit le tableau classe par classe : les descripteurs les plus proches caractérisent les produits que la classe **préfère**, les plus éloignés ceux qu'elle **rejette**. Cela doit confirmer la carte de la partie précédente, avec cette fois une mesure exacte dans $\mathbb{R}^{30}$. Avec des corrélations de l'ordre de 0,4 à 0,6 au mieux, les liens sont nets mais pas déterministes : un descripteur seul n'explique qu'une partie des préférences d'une classe.
+
+# Conclusion et suite
+
+- L'ACP de X1 montre des préférences **hétérogènes** et peu structurées par le questionnaire.
+- La CAH (Ward + consolidation) dégage `r K` **tendances de goût**, qui expliquent `r round(100 * I_inter / I_tot, 1)` % de l'inertie.
+- En résumant chaque classe par son barycentre, on peut placer les lignes de X3 dans le même espace que les classes, parce que **X1 et X3 partagent les produits et sont centrés-réduits par ligne**. Les distances, équivalentes à des corrélations, relient chaque classe aux caractéristiques des produits qu'elle préfère.
+- **Prochaine étape, le 4e coin X4** : croiser la description des classes par X2 (qui sont les consommateurs de chaque classe) avec leur description par X3 (ce qu'ils aiment dans les produits), pour relier les habitudes aux caractéristiques produits.
